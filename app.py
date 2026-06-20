@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
+from urllib.parse import urlencode
 
 import pandas as pd
 import plotly.express as px
@@ -20,6 +21,153 @@ DEFAULT_HISTORY_YEARS = 30
 DEFAULT_LOOKBACK_YEARS = 10
 
 app = FastAPI(title="OPEX Seasonality Dashboard")
+
+TICKER_PRESETS = ["SPY", "QQQ", "IWM", "DIA", "GLD"]
+
+BASE_CSS = """
+  :root {
+    --bg: #f1f5f9;
+    --surface: #ffffff;
+    --ink: #0f172a;
+    --muted: #64748b;
+    --line: #e2e8f0;
+    --accent: #2563eb;
+    --accent-weak: #eff6ff;
+    --pos: #15803d;
+    --pos-weak: #dcfce7;
+    --neg: #b91c1c;
+    --neg-weak: #fee2e2;
+    --shadow: 0 1px 2px rgba(15,23,42,.06), 0 4px 12px rgba(15,23,42,.05);
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.45;
+  }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 0 24px 64px; }
+
+  /* sticky header */
+  header.app-header {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(255,255,255,.82);
+    backdrop-filter: saturate(180%) blur(10px);
+    -webkit-backdrop-filter: saturate(180%) blur(10px);
+    border-bottom: 1px solid var(--line);
+  }
+  .header-inner {
+    max-width: 1200px; margin: 0 auto; padding: 12px 24px;
+    display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; letter-spacing: -.01em; }
+  .brand .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px var(--accent-weak); }
+  nav.section-nav { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
+  nav.section-nav a {
+    color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500;
+    padding: 8px 12px; border-radius: 8px; transition: all .15s ease;
+  }
+  nav.section-nav a:hover { color: var(--accent); background: var(--accent-weak); }
+
+  /* control bar */
+  .controls {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+    padding: 18px 20px; margin: 24px 0;
+  }
+  form.controls-form { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-end; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field > label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  input[type=text], input[type=number], select {
+    padding: 9px 12px; font-size: 14px; font-family: inherit; color: var(--ink);
+    background: #fff; border: 1px solid var(--line); border-radius: 9px;
+    transition: border-color .15s ease, box-shadow .15s ease; min-width: 96px;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-weak); }
+  .field-check { flex-direction: row; align-items: center; gap: 8px; padding-bottom: 10px; cursor: pointer; font-size: 14px; }
+  .field-check input { width: 16px; height: 16px; cursor: pointer; }
+  button.primary {
+    background: var(--accent); color: #fff; border: none; cursor: pointer;
+    padding: 10px 22px; font-size: 14px; font-weight: 600; border-radius: 9px;
+    transition: background .15s ease, transform .05s ease; font-family: inherit;
+  }
+  button.primary:hover { background: #1d4ed8; }
+  button.primary:active { transform: translateY(1px); }
+
+  /* presets */
+  .presets { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 16px; padding-top: 16px; border-top: 1px dashed var(--line); }
+  .presets .label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-right: 4px; }
+  .chip {
+    display: inline-block; text-decoration: none; font-size: 13px; font-weight: 600;
+    padding: 6px 14px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--ink); background: #fff; transition: all .15s ease; cursor: pointer; font-family: inherit;
+  }
+  .chip:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-weak); }
+  .chip.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  /* subhead + context */
+  .subhead { font-size: 13px; color: var(--muted); margin: 4px 0 0; }
+
+  section { scroll-margin-top: 76px; margin-top: 36px; }
+  .section-title { display: flex; align-items: baseline; gap: 12px; margin: 0 0 4px; }
+  .section-title h2 { font-size: 19px; margin: 0; letter-spacing: -.01em; }
+  .section-title .tag { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  .section-desc { color: var(--muted); font-size: 13px; margin: 0 0 16px; max-width: 760px; }
+
+  /* KPI cards */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin-top: 16px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px 20px; box-shadow: var(--shadow); position: relative; overflow: hidden;
+  }
+  .card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--accent); opacity: .9; }
+  .card.pos::before { background: var(--pos); }
+  .card.neg::before { background: var(--neg); }
+  .card.neutral::before { background: var(--muted); }
+  .card .label { font-size: 12px; color: var(--muted); margin-bottom: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .card .value { font-size: 26px; font-weight: 700; letter-spacing: -.02em; }
+
+  /* panels */
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 20px; margin-top: 16px; }
+  .panel h3 { margin: 0 0 4px; font-size: 15px; letter-spacing: -.01em; }
+  .panel > p:first-child { margin-top: 0; }
+
+  /* tables */
+  .table-wrap { overflow-x: auto; }
+  table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.data thead th {
+    background: #f8fafc; color: var(--muted); font-weight: 600; text-align: right;
+    padding: 10px 12px; border-bottom: 2px solid var(--line); white-space: nowrap; font-size: 12px;
+    text-transform: uppercase; letter-spacing: .03em;
+  }
+  table.data thead th:first-child, table.data tbody td:first-child { text-align: left; }
+  table.data tbody td { padding: 9px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  table.data tbody tr:nth-child(even) td { background: #f8fafc; }
+  table.data tbody tr:hover td { background: var(--accent-weak); }
+  .num.pos { color: var(--pos); font-weight: 600; }
+  .num.neg { color: var(--neg); font-weight: 600; }
+  .num.na { color: var(--muted); }
+
+  /* loading overlay */
+  #loader {
+    position: fixed; inset: 0; background: rgba(241,245,249,.72); backdrop-filter: blur(2px);
+    display: none; align-items: center; justify-content: center; z-index: 100;
+    font-size: 15px; font-weight: 600; color: var(--accent); gap: 12px;
+  }
+  #loader.show { display: flex; }
+  #loader .spinner { width: 22px; height: 22px; border: 3px solid var(--accent-weak); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  footer { margin-top: 40px; color: var(--muted); font-size: 12px; text-align: center; }
+  @media (max-width: 640px) {
+    .header-inner { gap: 12px; }
+    nav.section-nav { margin-left: 0; width: 100%; overflow-x: auto; }
+  }
+"""
 
 
 def compute_cycle_returns_with_prices(
@@ -140,6 +288,21 @@ def gradient_colors_for_returns(values: pd.Series) -> list[str]:
     return colors
 
 
+def apply_chart_theme(fig: go.Figure) -> go.Figure:
+    """Apply the shared fintech-light theme to a Plotly figure."""
+    fig.update_layout(
+        template="plotly_white",
+        font=dict(family="Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size=13, color="#0f172a"),
+        title_font=dict(size=17, color="#0f172a"),
+        margin=dict(l=48, r=24, t=64, b=44),
+        legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1, font=dict(size=12)),
+        hoverlabel=dict(bgcolor="#0f172a", font_size=12, font_color="#ffffff"),
+    )
+    fig.update_xaxes(gridcolor="#eef2f7", zerolinecolor="#e5e7eb", tickfont=dict(size=12))
+    fig.update_yaxes(gridcolor="#eef2f7", zerolinecolor="#e5e7eb", tickfont=dict(size=12))
+    return fig
+
+
 def build_selected_month_chart(selected_cycles: pd.DataFrame, month_name: str, ticker: str) -> str:
     if selected_cycles.empty:
         return "<p>No completed cycles available for the selected month in the current lookback window.</p>"
@@ -160,6 +323,7 @@ def build_selected_month_chart(selected_cycles: pd.DataFrame, month_name: str, t
         line_color="#1f77b4",
         annotation_text=f"Mean: {mean_value:.2f}%",
     )
+    apply_chart_theme(fig)
     fig.update_layout(height=420, margin=dict(l=40, r=20, t=60, b=40))
     return fig.to_html(include_plotlyjs=False, full_html=False)
 
@@ -366,6 +530,7 @@ def build_ytd_seasonality_chart(close: pd.Series, lookback_years: int, ticker: s
         )
     )
     fig.add_hline(y=0, line_color="#9ca3af", line_width=1)
+    apply_chart_theme(fig)
     fig.update_layout(
         title=f"{ticker.upper()} - YTD Cumulative Return: Prior-Year Mean vs Current Year",
         height=420,
@@ -402,6 +567,7 @@ def build_weekly_global_chart(weekly_summary: pd.DataFrame, ticker: str) -> str:
             yaxis="y2",
         )
     )
+    apply_chart_theme(fig)
     fig.update_layout(
         title=f"{ticker.upper()} - Weekly Bucket Mean Return and Standard Deviation",
         height=420,
@@ -466,6 +632,7 @@ def build_weekly_monthly_heatmap(weekly_monthly_summary: pd.DataFrame, ticker: s
             hovertemplate="%{customdata}<extra></extra>",
         )
     )
+    apply_chart_theme(fig)
     fig.update_layout(
         title=f"{ticker.upper()} - Weekly Bucket Mean Return by Month",
         height=520,
@@ -499,6 +666,7 @@ def build_monthly_comparison_chart(monthly_summary: pd.DataFrame, ticker: str) -
             yaxis="y2",
         )
     )
+    apply_chart_theme(fig)
     fig.update_layout(
         title=f"{ticker.upper()} - Monthly Mean Return and Standard Deviation",
         height=420,
@@ -561,6 +729,7 @@ def build_heatmap(cycle_returns: pd.DataFrame, ticker: str) -> str:
             hovertemplate="Year %{y}<br>Month %{x}<br>Return %{z:.2f}%<extra></extra>",
         )
     )
+    apply_chart_theme(fig)
     fig.update_layout(
         title=f"{ticker.upper()} - Monthly OPEX Cycle Return Heatmap",
         height=540,
@@ -610,6 +779,38 @@ def format_value(value: float, suffix: str = "") -> str:
     return f"{value:.2f}{suffix}"
 
 
+def color_signed_value(value: float, suffix: str = "") -> str:
+    """Return an HTML span with green/red coloring for a signed numeric value.
+
+    Used inside tables rendered with escape=False. NaN/empty become a muted dash.
+    """
+    if pd.isna(value):
+        return '<span class="num na">&mdash;</span>'
+    cls = "pos" if value > 0 else ("neg" if value < 0 else "")
+    return f'<span class="num {cls}">{value:+.2f}{suffix}</span>' if suffix else f'<span class="num {cls}">{value:.2f}</span>'
+
+
+def format_value_signed(value: float) -> str:
+    """Colored span form used for KPI cards that want a leading sign on returns."""
+    if pd.isna(value):
+        return '<span class="num na">N/A</span>'
+    cls = "pos" if value > 0 else ("neg" if value < 0 else "")
+    return f'<span class="num {cls}">{value:+.2f}%</span>'
+
+
+def build_query_string(ticker: str, month: int, lookback: int, show_weekly_std: bool) -> str:
+    """Build a GET query string preserving the active dashboard params."""
+    std_flag = "1" if show_weekly_std else "0"
+    return "?" + urlencode(
+        {
+            "ticker": ticker.upper(),
+            "month": month,
+            "lookback": lookback,
+            "show_weekly_std": std_flag,
+        }
+    )
+
+
 def render_dashboard(
     ticker: str,
     selected_month: int,
@@ -638,8 +839,9 @@ def render_dashboard(
     ].copy()
     for col in ["start_date", "end_date"]:
         selected_cycles_table[col] = selected_cycles_table[col].dt.strftime("%Y-%m-%d")
-    for col in ["start_close", "end_close", "return_pct"]:
+    for col in ["start_close", "end_close"]:
         selected_cycles_table[col] = selected_cycles_table[col].map(lambda x: f"{x:.2f}")
+    selected_cycles_table["return_pct"] = selected_cycles_table["return_pct"].map(color_signed_value)
 
     selected_month_chart = build_selected_month_chart(selected_cycles, month_name, ticker=ticker)
     heatmap_chart = build_heatmap(heatmap_source, ticker=ticker)
@@ -651,16 +853,23 @@ def render_dashboard(
         show_std=show_weekly_std,
     )
     monthly_comparison_table = monthly_comparison.copy()
-    for col in ["mean_return_pct", "std_return_pct"]:
-        monthly_comparison_table[col] = monthly_comparison_table[col].map(
-            lambda x: "" if pd.isna(x) else f"{x:.2f}"
-        )
+    monthly_comparison_table["mean_return_pct"] = monthly_comparison_table["mean_return_pct"].map(color_signed_value)
+    monthly_comparison_table["std_return_pct"] = monthly_comparison_table["std_return_pct"].map(
+        lambda x: "" if pd.isna(x) else f"{x:.2f}"
+    )
     weekly_global_table = weekly_global_summary.copy()
-    for col in ["mean_return_pct", "std_return_pct", "win_rate"]:
-        weekly_global_table[col] = weekly_global_table[col].map(lambda x: "" if pd.isna(x) else f"{x:.2f}")
+    weekly_global_table["mean_return_pct"] = weekly_global_table["mean_return_pct"].map(color_signed_value)
+    weekly_global_table["win_rate"] = weekly_global_table["win_rate"].map(
+        lambda x: "" if pd.isna(x) else f"{x:.2f}%"
+    )
+    weekly_global_table["std_return_pct"] = weekly_global_table["std_return_pct"].map(
+        lambda x: "" if pd.isna(x) else f"{x:.2f}"
+    )
     weekly_monthly_table = weekly_monthly_summary.copy()
-    for col in ["mean_return_pct", "std_return_pct"]:
-        weekly_monthly_table[col] = weekly_monthly_table[col].map(lambda x: "" if pd.isna(x) else f"{x:.2f}")
+    weekly_monthly_table["mean_return_pct"] = weekly_monthly_table["mean_return_pct"].map(color_signed_value)
+    weekly_monthly_table["std_return_pct"] = weekly_monthly_table["std_return_pct"].map(
+        lambda x: "" if pd.isna(x) else f"{x:.2f}"
+    )
 
     options_html = "".join(
         f'<option value="{month}" {"selected" if month == selected_month else ""}>{label}</option>'
@@ -668,91 +877,140 @@ def render_dashboard(
     )
     show_std_checked = "checked" if show_weekly_std else ""
 
+    active_ticker = ticker.upper()
+    preset_chips = "".join(
+        f'<a class="chip{" active" if preset == active_ticker else ""}" '
+        f'href="{build_query_string(preset, selected_month, lookback_years, show_weekly_std)}">{preset}</a>'
+        for preset in TICKER_PRESETS
+    )
+
+    mean_return = metrics["mean_return_pct"]
+    mean_card_cls = "pos" if (not pd.isna(mean_return) and mean_return > 0) else (
+        "neg" if (not pd.isna(mean_return) and mean_return < 0) else "neutral"
+    )
+
     return f"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>OPEX Seasonality Dashboard</title>
+  <title>OPEX Seasonality Dashboard - {active_ticker} {month_name}</title>
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
-  <style>
-    body {{ font-family: Arial, sans-serif; margin: 24px; background: #f7f7f8; color: #111827; }}
-    h1, h2 {{ margin-bottom: 8px; }}
-    form {{ display: flex; gap: 12px; flex-wrap: wrap; align-items: end; margin-bottom: 20px; }}
-    label {{ display: flex; flex-direction: column; font-size: 14px; gap: 6px; }}
-    input, select, button {{ padding: 8px 10px; font-size: 14px; }}
-    button {{ cursor: pointer; }}
-    .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }}
-    .card {{ background: white; padding: 16px; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.08); }}
-    .card .label {{ font-size: 13px; color: #4b5563; margin-bottom: 6px; }}
-    .card .value {{ font-size: 24px; font-weight: 700; }}
-    .panel {{ background: white; padding: 16px; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.08); margin-bottom: 20px; }}
-    table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
-    th, td {{ padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: right; }}
-    th:first-child, td:first-child {{ text-align: left; }}
-  </style>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>{BASE_CSS}</style>
 </head>
 <body>
-  <h1>OPEX Seasonality Dashboard</h1>
-  <p>Cycle definition: return from the prior monthly OPEX close to the selected month's OPEX close.</p>
-  <p>Showing the latest available {actual_lookback_years} completed {month_name} cycles for {ticker.upper()}.</p>
+  <div id="loader"><span class="spinner"></span>Loading data&hellip;</div>
 
-  <form method="get" action="/">
-    <label>
-      Ticker
-      <input type="text" name="ticker" value="{ticker.upper()}" />
-    </label>
-    <label>
-      Ending month
-      <select name="month">{options_html}</select>
-    </label>
-    <label>
-      Lookback years
-      <input type="number" name="lookback" min="3" max="30" value="{lookback_years}" />
-    </label>
-    <label style="flex-direction: row; align-items: center; gap: 8px; padding-bottom: 8px;">
-      <input type="checkbox" name="show_weekly_std" value="1" {show_std_checked} />
-      Show weekly std-dev labels
-    </label>
-    <button type="submit">Update</button>
-  </form>
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="brand"><span class="dot"></span>OPEX Seasonality</div>
+      <nav class="section-nav">
+        <a href="#overview">Overview</a>
+        <a href="#monthly">Monthly</a>
+        <a href="#weekly">Weekly</a>
+        <a href="#details">Details</a>
+      </nav>
+    </div>
+  </header>
 
-  <div class="cards">
-    <div class="card"><div class="label">{month_name} mean return</div><div class="value">{format_value(metrics["mean_return_pct"], "%")}</div></div>
-    <div class="card"><div class="label">{month_name} return std dev</div><div class="value">{format_value(metrics["std_return_pct"], "%")}</div></div>
-    <div class="card"><div class="label">{month_name} daily volatility</div><div class="value">{format_value(metrics["daily_vol_pct"], "%")}</div></div>
-    <div class="card"><div class="label">{month_name} annualized Sharpe</div><div class="value">{format_value(metrics["annualized_sharpe"])}</div></div>
-    <div class="card"><div class="label">Observations</div><div class="value">{metrics["observations"]}</div></div>
-  </div>
+  <main class="wrap">
+    <div class="controls">
+      <form class="controls-form" method="get" action="/" data-loader>
+        <div class="field">
+          <label for="ticker">Ticker</label>
+          <input type="text" id="ticker" name="ticker" value="{active_ticker}" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label for="month">Ending month</label>
+          <select id="month" name="month">{options_html}</select>
+        </div>
+        <div class="field">
+          <label for="lookback">Lookback years</label>
+          <input type="number" id="lookback" name="lookback" min="3" max="30" value="{lookback_years}" />
+        </div>
+        <label class="field-check">
+          <input type="checkbox" name="show_weekly_std" value="1" {show_std_checked} />
+          Show weekly std-dev labels
+        </label>
+        <button class="primary" type="submit">Update</button>
+      </form>
+      <div class="presets">
+        <span class="label">Quick tickers</span>
+        {preset_chips}
+      </div>
+    </div>
 
-  <div class="panel">{selected_month_chart}</div>
-  <div class="panel">{ytd_seasonality_chart}</div>
-  <div class="panel">{monthly_comparison_chart}</div>
-  <div class="panel">{weekly_global_chart}</div>
-  <div class="panel">{weekly_monthly_heatmap}</div>
-  <div class="panel">{heatmap_chart}</div>
+    <p class="subhead">
+      Showing the latest available {actual_lookback_years} completed {month_name} cycles for {active_ticker}.
+      Cycle = return from the prior monthly OPEX close to the selected month's OPEX close.
+    </p>
 
-  <div class="panel">
-    <h2>Monthly comparison</h2>
-    {monthly_comparison_table.to_html(index=False, escape=False)}
-  </div>
+    <section id="overview">
+      <div class="section-title"><h2>Overview</h2><span class="tag">{active_ticker} · {month_name} · {lookback_years}y</span></div>
+      <p class="section-desc">Headline seasonality metrics for the selected month's OPEX cycle, plus how the current year is tracking against the prior-year average.</p>
+      <div class="cards">
+        <div class="card {mean_card_cls}"><div class="label">{month_name} mean return</div><div class="value">{format_value_signed(metrics["mean_return_pct"])}</div></div>
+        <div class="card neutral"><div class="label">{month_name} return std dev</div><div class="value">{format_value(metrics["std_return_pct"], "%")}</div></div>
+        <div class="card neutral"><div class="label">{month_name} daily volatility</div><div class="value">{format_value(metrics["daily_vol_pct"], "%")}</div></div>
+        <div class="card neutral"><div class="label">{month_name} annualized Sharpe</div><div class="value">{format_value(metrics["annualized_sharpe"])}</div></div>
+        <div class="card neutral"><div class="label">Observations</div><div class="value">{metrics["observations"]}</div></div>
+      </div>
+      <div class="panel">{selected_month_chart}</div>
+      <div class="panel">{ytd_seasonality_chart}</div>
+    </section>
 
-  <div class="panel">
-    <h2>Weekly bucket summary</h2>
-    <p>Definition used: Week 1 and Week 2 are the first two Monday-Friday market weeks touching the month. OPEX Week is the market week containing that month's actual OPEX trading day. Post-OPEX Week is the next market week after that.</p>
-    {weekly_global_table.to_html(index=False, escape=False)}
-  </div>
+    <section id="monthly">
+      <div class="section-title"><h2>Monthly</h2><span class="tag">all months · {lookback_years}y window</span></div>
+      <p class="section-desc">How every calendar month compares on average OPEX-cycle return and dispersion, with a full year-by-year heatmap.</p>
+      <div class="panel">{monthly_comparison_chart}</div>
+      <div class="panel">{heatmap_chart}</div>
+      <div class="panel">
+        <h3>Monthly comparison</h3>
+        <div class="table-wrap">{monthly_comparison_table.to_html(index=False, escape=False, classes="data")}</div>
+      </div>
+    </section>
 
-  <div class="panel">
-    <h2>Weekly bucket monthly breakdown</h2>
-    {weekly_monthly_table.to_html(index=False, escape=False)}
-  </div>
+    <section id="weekly">
+      <div class="section-title"><h2>Weekly</h2><span class="tag">within-month buckets</span></div>
+      <p class="section-desc">Performance split into Week 1, Week 2, OPEX Week, and Post-OPEX Week. Week 1 &amp; Week 2 are the first two Mon-Fri market weeks touching the month; OPEX Week contains that month's OPEX day; Post-OPEX Week is the next market week after.</p>
+      <div class="panel">{weekly_global_chart}</div>
+      <div class="panel">{weekly_monthly_heatmap}</div>
+      <div class="panel">
+        <h3>Weekly bucket summary</h3>
+        <div class="table-wrap">{weekly_global_table.to_html(index=False, escape=False, classes="data")}</div>
+      </div>
+      <div class="panel">
+        <h3>Weekly bucket monthly breakdown</h3>
+        <div class="table-wrap">{weekly_monthly_table.to_html(index=False, escape=False, classes="data")}</div>
+      </div>
+    </section>
 
-  <div class="panel">
-    <h2>{month_name} cycle details</h2>
-    {selected_cycles_table.to_html(index=False, escape=False)}
-  </div>
+    <section id="details">
+      <div class="section-title"><h2>Details</h2><span class="tag">{month_name} cycle-by-cycle</span></div>
+      <p class="section-desc">Underlying OPEX start/end prices and resulting returns for each of the {actual_lookback_years} completed {month_name} cycles.</p>
+      <div class="panel">
+        <h3>{month_name} cycle details</h3>
+        <div class="table-wrap">{selected_cycles_table.to_html(index=False, escape=False, classes="data")}</div>
+      </div>
+    </section>
+
+    <footer>Prices via yfinance. Past seasonality is descriptive, not predictive.</footer>
+  </main>
+
+  <script>
+    (function () {{
+      var form = document.querySelector('form[data-loader]');
+      var loader = document.getElementById('loader');
+      if (form && loader) {{
+        form.addEventListener('submit', function () {{ loader.classList.add('show'); }});
+        window.addEventListener('pageshow', function () {{ loader.classList.remove('show'); }});
+      }}
+    }})();
+  </script>
 </body>
 </html>
 """
@@ -770,6 +1028,7 @@ def render_error_page(
         for month, label in MONTH_NAMES.items()
     )
     show_std_checked = "checked" if show_weekly_std else ""
+    active_ticker = ticker.upper()
 
     return f"""
 <!DOCTYPE html>
@@ -777,44 +1036,53 @@ def render_error_page(
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>OPEX Seasonality Dashboard</title>
-  <style>
-    body {{ font-family: Arial, sans-serif; margin: 24px; background: #f7f7f8; color: #111827; }}
-    form {{ display: flex; gap: 12px; flex-wrap: wrap; align-items: end; margin-bottom: 20px; }}
-    label {{ display: flex; flex-direction: column; font-size: 14px; gap: 6px; }}
-    input, select, button {{ padding: 8px 10px; font-size: 14px; }}
-    button {{ cursor: pointer; }}
-    .panel {{ background: white; padding: 16px; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.08); margin-bottom: 20px; }}
-    code {{ white-space: pre-wrap; word-break: break-word; }}
-  </style>
+  <title>OPEX Seasonality Dashboard - {active_ticker}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>{BASE_CSS}</style>
 </head>
 <body>
-  <h1>OPEX Seasonality Dashboard</h1>
-  <form method="get" action="/">
-    <label>
-      Ticker
-      <input type="text" name="ticker" value="{ticker.upper()}" />
-    </label>
-    <label>
-      Ending month
-      <select name="month">{options_html}</select>
-    </label>
-    <label>
-      Lookback years
-      <input type="number" name="lookback" min="3" max="30" value="{lookback_years}" />
-    </label>
-    <label style="flex-direction: row; align-items: center; gap: 8px; padding-bottom: 8px;">
-      <input type="checkbox" name="show_weekly_std" value="1" {show_std_checked} />
-      Show weekly std-dev labels
-    </label>
-    <button type="submit">Update</button>
-  </form>
-  <div class="panel">
-    <h2>Data load failed</h2>
-    <p>The app could not retrieve price history for <strong>{ticker.upper()}</strong>.</p>
-    <code>{error_message}</code>
-    <p>Common causes: temporary Yahoo response failure, network filtering, or a local package issue in yfinance/requests.</p>
-  </div>
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="brand"><span class="dot"></span>OPEX Seasonality</div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <div class="controls">
+      <form class="controls-form" method="get" action="/" data-loader>
+        <div class="field">
+          <label for="ticker">Ticker</label>
+          <input type="text" id="ticker" name="ticker" value="{active_ticker}" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label for="month">Ending month</label>
+          <select id="month" name="month">{options_html}</select>
+        </div>
+        <div class="field">
+          <label for="lookback">Lookback years</label>
+          <input type="number" id="lookback" name="lookback" min="3" max="30" value="{lookback_years}" />
+        </div>
+        <label class="field-check">
+          <input type="checkbox" name="show_weekly_std" value="1" {show_std_checked} />
+          Show weekly std-dev labels
+        </label>
+        <button class="primary" type="submit">Update</button>
+      </form>
+    </div>
+
+    <section id="error" style="margin-top:24px;">
+      <div class="section-title"><h2>Data load failed</h2><span class="tag" style="color:var(--neg);">error</span></div>
+      <div class="panel" style="border-left:4px solid var(--neg);">
+        <p>The app could not retrieve price history for <strong>{active_ticker}</strong>.</p>
+        <p style="margin-top:12px;"><code style="background:#f8fafc;border:1px solid var(--line);border-radius:6px;padding:8px 10px;white-space:pre-wrap;word-break:break-word;font-size:12px;color:var(--neg);">{error_message}</code></p>
+        <p style="margin-top:12px;color:var(--muted);">Common causes: temporary Yahoo response failure, network filtering, or a local package issue in yfinance/requests.</p>
+      </div>
+    </section>
+
+    <footer>Prices via yfinance. Past seasonality is descriptive, not predictive.</footer>
+  </main>
 </body>
 </html>
 """
