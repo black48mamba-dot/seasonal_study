@@ -18,6 +18,13 @@ Cycle definition:
 - year-by-year selected-month return chart
 - monthly mean return and standard deviation comparison
 - heatmap of monthly OPEX-cycle returns across years
+- weekly seasonality analysis:
+  - week 1
+  - week 2
+  - OPEX week
+  - post-OPEX week
+- weekly bucket global mean/std summary
+- weekly bucket monthly breakdown heatmap and table
 - YTD cumulative return overlay:
   - average prior-year path
   - current-year path to latest available date
@@ -72,6 +79,25 @@ The app automatically:
 - keeps the current year visible in the heatmap
 - leaves future incomplete months blank
 
+## Weekly seasonality definitions
+
+The weekly analysis uses these bucket definitions for each month:
+
+- Week 1 = first Monday-Friday market week touching the month
+- Week 2 = second Monday-Friday market week touching the month
+- OPEX Week = market week containing that month's actual OPEX trading day
+- Post-OPEX Week = next market week after OPEX Week
+
+Weekly return is calculated as:
+
+- close of the trading day before the bucket starts
+- to the close of the last trading day in that bucket
+
+This allows:
+
+- global average performance of each weekly bucket
+- monthly breakdown of how those weekly buckets behave across the year
+
 ## Notes on data
 
 - price data is fetched with `yfinance`
@@ -94,6 +120,16 @@ To compare the July OPEX cycle for SPY over the last 10 years:
 3. enter `SPY`
 4. choose `Jul`
 5. set lookback to `10`
+
+To inspect weekly behavior:
+
+1. open the dashboard
+2. choose a ticker and lookback window
+3. review:
+   - Weekly Bucket Mean Return and Standard Deviation
+   - Weekly Bucket Mean Return by Month
+   - Weekly bucket summary table
+   - Weekly bucket monthly breakdown table
 
 ## Clone
 

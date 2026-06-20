@@ -140,7 +140,7 @@ def gradient_colors_for_returns(values: pd.Series) -> list[str]:
     return colors
 
 
-def build_selected_month_chart(selected_cycles: pd.DataFrame, month_name: str) -> str:
+def build_selected_month_chart(selected_cycles: pd.DataFrame, month_name: str, ticker: str) -> str:
     if selected_cycles.empty:
         return "<p>No completed cycles available for the selected month in the current lookback window.</p>"
 
@@ -149,7 +149,7 @@ def build_selected_month_chart(selected_cycles: pd.DataFrame, month_name: str) -
         selected_cycles,
         x="cycle_year",
         y="return_pct",
-        title=f"{month_name} OPEX-to-OPEX Returns by Year",
+        title=f"{ticker.upper()} - {month_name} OPEX-to-OPEX Returns by Year",
         labels={"cycle_year": "Cycle year", "return_pct": "Return %"},
     )
     fig.update_traces(marker_color=bar_colors)
@@ -316,7 +316,7 @@ def summarize_weekly_buckets_by_month(weekly_returns: pd.DataFrame) -> pd.DataFr
     return summary
 
 
-def build_ytd_seasonality_chart(close: pd.Series, lookback_years: int) -> str:
+def build_ytd_seasonality_chart(close: pd.Series, lookback_years: int, ticker: str) -> str:
     daily_returns = close.pct_change().dropna()
     if daily_returns.empty:
         return "<p>No daily data available for the YTD seasonality overlay.</p>"
@@ -367,7 +367,7 @@ def build_ytd_seasonality_chart(close: pd.Series, lookback_years: int) -> str:
     )
     fig.add_hline(y=0, line_color="#9ca3af", line_width=1)
     fig.update_layout(
-        title="YTD Cumulative Return: Prior-Year Mean vs Current Year",
+        title=f"{ticker.upper()} - YTD Cumulative Return: Prior-Year Mean vs Current Year",
         height=420,
         margin=dict(l=40, r=20, t=60, b=40),
         xaxis=dict(title="Trading day of year"),
@@ -377,7 +377,7 @@ def build_ytd_seasonality_chart(close: pd.Series, lookback_years: int) -> str:
     return fig.to_html(include_plotlyjs=False, full_html=False)
 
 
-def build_weekly_global_chart(weekly_summary: pd.DataFrame) -> str:
+def build_weekly_global_chart(weekly_summary: pd.DataFrame, ticker: str) -> str:
     if weekly_summary.empty:
         return "<p>No weekly bucket data available.</p>"
 
@@ -403,7 +403,7 @@ def build_weekly_global_chart(weekly_summary: pd.DataFrame) -> str:
         )
     )
     fig.update_layout(
-        title="Weekly Bucket Mean Return and Standard Deviation",
+        title=f"{ticker.upper()} - Weekly Bucket Mean Return and Standard Deviation",
         height=420,
         margin=dict(l=40, r=40, t=60, b=40),
         yaxis=dict(title="Mean return %"),
@@ -413,41 +413,68 @@ def build_weekly_global_chart(weekly_summary: pd.DataFrame) -> str:
     return fig.to_html(include_plotlyjs=False, full_html=False)
 
 
-def build_weekly_monthly_heatmap(weekly_monthly_summary: pd.DataFrame) -> str:
+def build_weekly_monthly_heatmap(weekly_monthly_summary: pd.DataFrame, ticker: str, show_std: bool) -> str:
     if weekly_monthly_summary.empty:
         return "<p>No monthly weekly-bucket data available.</p>"
 
-    pivot = (
+    mean_pivot = (
         weekly_monthly_summary.pivot(index="cycle_label", columns="bucket_label", values="mean_return_pct")
         .reindex([MONTH_NAMES[m] for m in range(1, 13)])
     )
+    std_pivot = (
+        weekly_monthly_summary.pivot(index="cycle_label", columns="bucket_label", values="std_return_pct")
+        .reindex([MONTH_NAMES[m] for m in range(1, 13)])
+    )
     bucket_columns = ["Week 1", "Week 2", "OPEX Week", "Post-OPEX Week"]
-    pivot = pivot[[column for column in bucket_columns if column in pivot.columns]]
-    colorscale, zmin, zmax = build_return_colorscale(pivot.values)
+    bucket_columns = [column for column in bucket_columns if column in mean_pivot.columns]
+    mean_pivot = mean_pivot[bucket_columns]
+    std_pivot = std_pivot[bucket_columns]
+    colorscale, zmin, zmax = build_return_colorscale(mean_pivot.values)
+
+    text_values = []
+    hover_text = []
+    for month_label in mean_pivot.index:
+        text_row = []
+        hover_row = []
+        for bucket_label in mean_pivot.columns:
+            mean_value = mean_pivot.loc[month_label, bucket_label]
+            std_value = std_pivot.loc[month_label, bucket_label]
+            if pd.notna(mean_value):
+                std_text = "N/A" if pd.isna(std_value) else f"{std_value:.2f}%"
+                text_row.append(f"{mean_value:.2f}%<br>({std_text})" if show_std else f"{mean_value:.2f}%")
+                hover_row.append(
+                    f"Month {month_label}<br>Bucket {bucket_label}<br>Mean return {mean_value:.2f}%<br>Std dev {std_text}"
+                )
+            else:
+                text_row.append("")
+                hover_row.append(f"Month {month_label}<br>Bucket {bucket_label}<br>No data")
+        text_values.append(text_row)
+        hover_text.append(hover_row)
 
     fig = go.Figure(
         data=go.Heatmap(
-            z=pivot.values,
-            x=list(pivot.columns),
-            y=list(pivot.index),
+            z=mean_pivot.values,
+            x=list(mean_pivot.columns),
+            y=list(mean_pivot.index),
             colorscale=colorscale,
             zmin=zmin,
             zmax=zmax,
             colorbar=dict(title="Mean return %"),
-            text=[[f"{value:.2f}%" if pd.notna(value) else "" for value in row] for row in pivot.values],
+            text=text_values,
             texttemplate="%{text}",
-            hovertemplate="Month %{y}<br>Bucket %{x}<br>Mean return %{z:.2f}%<extra></extra>",
+            customdata=hover_text,
+            hovertemplate="%{customdata}<extra></extra>",
         )
     )
     fig.update_layout(
-        title="Weekly Bucket Mean Return by Month",
+        title=f"{ticker.upper()} - Weekly Bucket Mean Return by Month",
         height=520,
         margin=dict(l=40, r=20, t=60, b=40),
     )
     return fig.to_html(include_plotlyjs=False, full_html=False)
 
 
-def build_monthly_comparison_chart(monthly_summary: pd.DataFrame) -> str:
+def build_monthly_comparison_chart(monthly_summary: pd.DataFrame, ticker: str) -> str:
     if monthly_summary.empty:
         return "<p>No monthly comparison data available.</p>"
 
@@ -473,7 +500,7 @@ def build_monthly_comparison_chart(monthly_summary: pd.DataFrame) -> str:
         )
     )
     fig.update_layout(
-        title="Monthly Mean Return and Standard Deviation",
+        title=f"{ticker.upper()} - Monthly Mean Return and Standard Deviation",
         height=420,
         margin=dict(l=40, r=40, t=60, b=40),
         yaxis=dict(title="Mean return %"),
@@ -512,7 +539,7 @@ def build_return_colorscale(values: pd.DataFrame) -> tuple[list[list[float | str
     return colorscale, zmin, zmax
 
 
-def build_heatmap(cycle_returns: pd.DataFrame) -> str:
+def build_heatmap(cycle_returns: pd.DataFrame, ticker: str) -> str:
     pivot = (
         cycle_returns.pivot(index="cycle_year", columns="cycle_month", values="return_pct")
         .sort_index()
@@ -535,7 +562,7 @@ def build_heatmap(cycle_returns: pd.DataFrame) -> str:
         )
     )
     fig.update_layout(
-        title="Monthly OPEX Cycle Return Heatmap",
+        title=f"{ticker.upper()} - Monthly OPEX Cycle Return Heatmap",
         height=540,
         margin=dict(l=40, r=20, t=60, b=40),
     )
@@ -587,6 +614,7 @@ def render_dashboard(
     ticker: str,
     selected_month: int,
     lookback_years: int,
+    show_weekly_std: bool,
 ) -> str:
     history_years = max(lookback_years + 2, 12)
     cycle_returns, close = compute_cycle_returns_with_prices(ticker, history_years=history_years)
@@ -603,7 +631,7 @@ def render_dashboard(
     weekly_returns = compute_week_bucket_returns(close, heatmap_source)
     weekly_global_summary = summarize_weekly_buckets(weekly_returns)
     weekly_monthly_summary = summarize_weekly_buckets_by_month(weekly_returns)
-    ytd_seasonality_chart = build_ytd_seasonality_chart(close, lookback_years=lookback_years)
+    ytd_seasonality_chart = build_ytd_seasonality_chart(close, lookback_years=lookback_years, ticker=ticker)
 
     selected_cycles_table = selected_cycles[
         ["cycle_year", "start_date", "end_date", "start_close", "end_close", "return_pct"]
@@ -613,11 +641,15 @@ def render_dashboard(
     for col in ["start_close", "end_close", "return_pct"]:
         selected_cycles_table[col] = selected_cycles_table[col].map(lambda x: f"{x:.2f}")
 
-    selected_month_chart = build_selected_month_chart(selected_cycles, month_name)
-    heatmap_chart = build_heatmap(heatmap_source)
-    monthly_comparison_chart = build_monthly_comparison_chart(monthly_comparison)
-    weekly_global_chart = build_weekly_global_chart(weekly_global_summary)
-    weekly_monthly_heatmap = build_weekly_monthly_heatmap(weekly_monthly_summary)
+    selected_month_chart = build_selected_month_chart(selected_cycles, month_name, ticker=ticker)
+    heatmap_chart = build_heatmap(heatmap_source, ticker=ticker)
+    monthly_comparison_chart = build_monthly_comparison_chart(monthly_comparison, ticker=ticker)
+    weekly_global_chart = build_weekly_global_chart(weekly_global_summary, ticker=ticker)
+    weekly_monthly_heatmap = build_weekly_monthly_heatmap(
+        weekly_monthly_summary,
+        ticker=ticker,
+        show_std=show_weekly_std,
+    )
     monthly_comparison_table = monthly_comparison.copy()
     for col in ["mean_return_pct", "std_return_pct"]:
         monthly_comparison_table[col] = monthly_comparison_table[col].map(
@@ -634,6 +666,7 @@ def render_dashboard(
         f'<option value="{month}" {"selected" if month == selected_month else ""}>{label}</option>'
         for month, label in MONTH_NAMES.items()
     )
+    show_std_checked = "checked" if show_weekly_std else ""
 
     return f"""
 <!DOCTYPE html>
@@ -677,6 +710,10 @@ def render_dashboard(
     <label>
       Lookback years
       <input type="number" name="lookback" min="3" max="30" value="{lookback_years}" />
+    </label>
+    <label style="flex-direction: row; align-items: center; gap: 8px; padding-bottom: 8px;">
+      <input type="checkbox" name="show_weekly_std" value="1" {show_std_checked} />
+      Show weekly std-dev labels
     </label>
     <button type="submit">Update</button>
   </form>
@@ -726,11 +763,13 @@ def render_error_page(
     selected_month: int,
     lookback_years: int,
     error_message: str,
+    show_weekly_std: bool,
 ) -> str:
     options_html = "".join(
         f'<option value="{month}" {"selected" if month == selected_month else ""}>{label}</option>'
         for month, label in MONTH_NAMES.items()
     )
+    show_std_checked = "checked" if show_weekly_std else ""
 
     return f"""
 <!DOCTYPE html>
@@ -764,6 +803,10 @@ def render_error_page(
       Lookback years
       <input type="number" name="lookback" min="3" max="30" value="{lookback_years}" />
     </label>
+    <label style="flex-direction: row; align-items: center; gap: 8px; padding-bottom: 8px;">
+      <input type="checkbox" name="show_weekly_std" value="1" {show_std_checked} />
+      Show weekly std-dev labels
+    </label>
     <button type="submit">Update</button>
   </form>
   <div class="panel">
@@ -782,14 +825,21 @@ def home(
     ticker: str = Query("SPY"),
     month: int = Query(datetime.now().month, ge=1, le=12),
     lookback: int = Query(DEFAULT_LOOKBACK_YEARS, ge=3, le=30),
+    show_weekly_std: bool = Query(False),
 ) -> HTMLResponse:
     try:
-        html = render_dashboard(ticker=ticker, selected_month=month, lookback_years=lookback)
+        html = render_dashboard(
+            ticker=ticker,
+            selected_month=month,
+            lookback_years=lookback,
+            show_weekly_std=show_weekly_std,
+        )
     except Exception as exc:
         html = render_error_page(
             ticker=ticker,
             selected_month=month,
             lookback_years=lookback,
             error_message=str(exc),
+            show_weekly_std=show_weekly_std,
         )
     return HTMLResponse(html)
