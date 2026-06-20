@@ -180,6 +180,142 @@ def summarize_monthly_comparison(cycle_returns: pd.DataFrame) -> pd.DataFrame:
     ]
 
 
+def get_previous_close_date(target_date: pd.Timestamp, trading_index: pd.DatetimeIndex) -> pd.Timestamp | None:
+    eligible = trading_index[trading_index < target_date]
+    if len(eligible) == 0:
+        return None
+    return eligible[-1]
+
+
+def compute_week_bucket_returns(close: pd.Series, cycle_returns: pd.DataFrame) -> pd.DataFrame:
+    trading_index = close.index
+    bucket_order = {
+        "week_1": 1,
+        "week_2": 2,
+        "opex_week": 3,
+        "post_opex_week": 4,
+    }
+    bucket_labels = {
+        "week_1": "Week 1",
+        "week_2": "Week 2",
+        "opex_week": "OPEX Week",
+        "post_opex_week": "Post-OPEX Week",
+    }
+
+    rows: list[dict] = []
+    month_rows = cycle_returns[["ticker", "cycle_year", "cycle_month", "cycle_label", "end_date"]].dropna().drop_duplicates()
+
+    for row in month_rows.itertuples(index=False):
+        month_start = pd.Timestamp(year=int(row.cycle_year), month=int(row.cycle_month), day=1)
+        month_end = month_start + pd.offsets.MonthEnd(1)
+        week_cursor = month_start - pd.Timedelta(days=month_start.weekday())
+
+        week_segments: list[dict] = []
+        while week_cursor <= month_end:
+            segment_start = max(week_cursor, month_start)
+            segment_end = min(week_cursor + pd.Timedelta(days=6), month_end)
+            week_days = trading_index[(trading_index >= segment_start) & (trading_index <= segment_end)]
+            if len(week_days) > 0:
+                week_segments.append(
+                    {
+                        "start_date": week_days[0],
+                        "end_date": week_days[-1],
+                    }
+                )
+            week_cursor += pd.Timedelta(days=7)
+
+        if not week_segments:
+            continue
+
+        bucket_to_segment: dict[str, dict] = {}
+        if len(week_segments) >= 1:
+            bucket_to_segment["week_1"] = week_segments[0]
+        if len(week_segments) >= 2:
+            bucket_to_segment["week_2"] = week_segments[1]
+
+        opex_index = next(
+            (idx for idx, segment in enumerate(week_segments) if segment["start_date"] <= row.end_date <= segment["end_date"]),
+            None,
+        )
+        if opex_index is not None:
+            bucket_to_segment["opex_week"] = week_segments[opex_index]
+            if opex_index + 1 < len(week_segments):
+                bucket_to_segment["post_opex_week"] = week_segments[opex_index + 1]
+
+        for bucket_key, segment in bucket_to_segment.items():
+            previous_close_date = get_previous_close_date(segment["start_date"], trading_index)
+            if previous_close_date is None:
+                continue
+
+            start_close = float(close.loc[previous_close_date])
+            end_close = float(close.loc[segment["end_date"]])
+            rows.append(
+                {
+                    "ticker": row.ticker,
+                    "cycle_year": int(row.cycle_year),
+                    "cycle_month": int(row.cycle_month),
+                    "cycle_label": row.cycle_label,
+                    "bucket_key": bucket_key,
+                    "bucket_label": bucket_labels[bucket_key],
+                    "bucket_order": bucket_order[bucket_key],
+                    "start_date": segment["start_date"],
+                    "end_date": segment["end_date"],
+                    "return_pct": (end_close / start_close - 1.0) * 100.0,
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+def summarize_weekly_buckets(weekly_returns: pd.DataFrame) -> pd.DataFrame:
+    if weekly_returns.empty:
+        return pd.DataFrame(
+            columns=["bucket_key", "bucket_label", "bucket_order", "observations", "mean_return_pct", "std_return_pct", "win_rate"]
+        )
+
+    summary = (
+        weekly_returns.groupby(["bucket_key", "bucket_label", "bucket_order"], as_index=False)["return_pct"]
+        .agg(
+            observations="count",
+            mean_return_pct="mean",
+            std_return_pct=lambda s: s.std(ddof=1),
+            win_rate=lambda s: (s > 0).mean() * 100.0,
+        )
+        .sort_values("bucket_order")
+    )
+    return summary
+
+
+def summarize_weekly_buckets_by_month(weekly_returns: pd.DataFrame) -> pd.DataFrame:
+    if weekly_returns.empty:
+        return pd.DataFrame(
+            columns=[
+                "cycle_month",
+                "cycle_label",
+                "bucket_key",
+                "bucket_label",
+                "bucket_order",
+                "observations",
+                "mean_return_pct",
+                "std_return_pct",
+            ]
+        )
+
+    summary = (
+        weekly_returns.groupby(
+            ["cycle_month", "cycle_label", "bucket_key", "bucket_label", "bucket_order"],
+            as_index=False,
+        )["return_pct"]
+        .agg(
+            observations="count",
+            mean_return_pct="mean",
+            std_return_pct=lambda s: s.std(ddof=1),
+        )
+        .sort_values(["cycle_month", "bucket_order"])
+    )
+    return summary
+
+
 def build_ytd_seasonality_chart(close: pd.Series, lookback_years: int) -> str:
     daily_returns = close.pct_change().dropna()
     if daily_returns.empty:
@@ -237,6 +373,76 @@ def build_ytd_seasonality_chart(close: pd.Series, lookback_years: int) -> str:
         xaxis=dict(title="Trading day of year"),
         yaxis=dict(title="Cumulative return %"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    return fig.to_html(include_plotlyjs=False, full_html=False)
+
+
+def build_weekly_global_chart(weekly_summary: pd.DataFrame) -> str:
+    if weekly_summary.empty:
+        return "<p>No weekly bucket data available.</p>"
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=weekly_summary["bucket_label"],
+            y=weekly_summary["mean_return_pct"],
+            name="Mean return %",
+            marker_color=gradient_colors_for_returns(weekly_summary["mean_return_pct"]),
+            yaxis="y",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=weekly_summary["bucket_label"],
+            y=weekly_summary["std_return_pct"],
+            name="Std dev %",
+            mode="lines+markers",
+            marker=dict(color="#1f77b4"),
+            line=dict(color="#1f77b4", width=2),
+            yaxis="y2",
+        )
+    )
+    fig.update_layout(
+        title="Weekly Bucket Mean Return and Standard Deviation",
+        height=420,
+        margin=dict(l=40, r=40, t=60, b=40),
+        yaxis=dict(title="Mean return %"),
+        yaxis2=dict(title="Std dev %", overlaying="y", side="right"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    return fig.to_html(include_plotlyjs=False, full_html=False)
+
+
+def build_weekly_monthly_heatmap(weekly_monthly_summary: pd.DataFrame) -> str:
+    if weekly_monthly_summary.empty:
+        return "<p>No monthly weekly-bucket data available.</p>"
+
+    pivot = (
+        weekly_monthly_summary.pivot(index="cycle_label", columns="bucket_label", values="mean_return_pct")
+        .reindex([MONTH_NAMES[m] for m in range(1, 13)])
+    )
+    bucket_columns = ["Week 1", "Week 2", "OPEX Week", "Post-OPEX Week"]
+    pivot = pivot[[column for column in bucket_columns if column in pivot.columns]]
+    colorscale, zmin, zmax = build_return_colorscale(pivot.values)
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=pivot.values,
+            x=list(pivot.columns),
+            y=list(pivot.index),
+            colorscale=colorscale,
+            zmin=zmin,
+            zmax=zmax,
+            colorbar=dict(title="Mean return %"),
+            text=[[f"{value:.2f}%" if pd.notna(value) else "" for value in row] for row in pivot.values],
+            texttemplate="%{text}",
+            hovertemplate="Month %{y}<br>Bucket %{x}<br>Mean return %{z:.2f}%<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title="Weekly Bucket Mean Return by Month",
+        height=520,
+        margin=dict(l=40, r=20, t=60, b=40),
     )
     return fig.to_html(include_plotlyjs=False, full_html=False)
 
@@ -394,6 +600,9 @@ def render_dashboard(
 
     heatmap_source = select_heatmap_window(cycle_returns, lookback_years=lookback_years)
     monthly_comparison = summarize_monthly_comparison(heatmap_source)
+    weekly_returns = compute_week_bucket_returns(close, heatmap_source)
+    weekly_global_summary = summarize_weekly_buckets(weekly_returns)
+    weekly_monthly_summary = summarize_weekly_buckets_by_month(weekly_returns)
     ytd_seasonality_chart = build_ytd_seasonality_chart(close, lookback_years=lookback_years)
 
     selected_cycles_table = selected_cycles[
@@ -407,11 +616,19 @@ def render_dashboard(
     selected_month_chart = build_selected_month_chart(selected_cycles, month_name)
     heatmap_chart = build_heatmap(heatmap_source)
     monthly_comparison_chart = build_monthly_comparison_chart(monthly_comparison)
+    weekly_global_chart = build_weekly_global_chart(weekly_global_summary)
+    weekly_monthly_heatmap = build_weekly_monthly_heatmap(weekly_monthly_summary)
     monthly_comparison_table = monthly_comparison.copy()
     for col in ["mean_return_pct", "std_return_pct"]:
         monthly_comparison_table[col] = monthly_comparison_table[col].map(
             lambda x: "" if pd.isna(x) else f"{x:.2f}"
         )
+    weekly_global_table = weekly_global_summary.copy()
+    for col in ["mean_return_pct", "std_return_pct", "win_rate"]:
+        weekly_global_table[col] = weekly_global_table[col].map(lambda x: "" if pd.isna(x) else f"{x:.2f}")
+    weekly_monthly_table = weekly_monthly_summary.copy()
+    for col in ["mean_return_pct", "std_return_pct"]:
+        weekly_monthly_table[col] = weekly_monthly_table[col].map(lambda x: "" if pd.isna(x) else f"{x:.2f}")
 
     options_html = "".join(
         f'<option value="{month}" {"selected" if month == selected_month else ""}>{label}</option>'
@@ -475,11 +692,24 @@ def render_dashboard(
   <div class="panel">{selected_month_chart}</div>
   <div class="panel">{ytd_seasonality_chart}</div>
   <div class="panel">{monthly_comparison_chart}</div>
+  <div class="panel">{weekly_global_chart}</div>
+  <div class="panel">{weekly_monthly_heatmap}</div>
   <div class="panel">{heatmap_chart}</div>
 
   <div class="panel">
     <h2>Monthly comparison</h2>
     {monthly_comparison_table.to_html(index=False, escape=False)}
+  </div>
+
+  <div class="panel">
+    <h2>Weekly bucket summary</h2>
+    <p>Definition used: Week 1 and Week 2 are the first two Monday-Friday market weeks touching the month. OPEX Week is the market week containing that month's actual OPEX trading day. Post-OPEX Week is the next market week after that.</p>
+    {weekly_global_table.to_html(index=False, escape=False)}
+  </div>
+
+  <div class="panel">
+    <h2>Weekly bucket monthly breakdown</h2>
+    {weekly_monthly_table.to_html(index=False, escape=False)}
   </div>
 
   <div class="panel">
