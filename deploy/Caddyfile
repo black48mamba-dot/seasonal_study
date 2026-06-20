@@ -1,0 +1,15 @@
+# Replace seasonality.example.com with your real domain.
+# Caddy will automatically manage HTTPS when DNS points here
+# and ports 80/443 are reachable from the internet.
+
+seasonality.example.com {
+    encode gzip zstd
+
+    reverse_proxy 127.0.0.1:8000
+
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+}

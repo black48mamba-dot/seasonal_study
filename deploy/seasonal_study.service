@@ -1,0 +1,17 @@
+[Unit]
+Description=OPEX Seasonality Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+Group=YOUR_USER
+WorkingDirectory=/opt/seasonal_study
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/seasonal_study/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -64,6 +64,104 @@ Then open:
 http://YOUR_SERVER_IP:8000
 ```
 
+## Internet-facing Linux deployment
+
+This repo includes example deployment files in `deploy/`:
+
+- `deploy/seasonal_study.service` - systemd unit for the app
+- `deploy/Caddyfile` - reverse proxy with automatic HTTPS
+- `deploy/cloudflared-config.yml` - optional Cloudflare Tunnel config
+
+Recommended layout on the server:
+
+```text
+/opt/seasonal_study
+```
+
+### Option A: Caddy + public ports 80/443
+
+Use this if:
+
+- you have a domain name
+- DNS can point to your server
+- your router/firewall can forward ports `80` and `443`
+
+High-level steps:
+
+1. clone the repo to the server
+2. create a virtualenv
+3. install dependencies
+4. install the systemd service
+5. install Caddy
+6. point your domain to the server
+7. use `deploy/Caddyfile` as the base config
+
+Example app setup:
+
+```bash
+git clone git@github.com:black48mamba-dot/seasonal_study.git /opt/seasonal_study
+cd /opt/seasonal_study
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Install the service:
+
+```bash
+sudo cp deploy/seasonal_study.service /etc/systemd/system/seasonal_study.service
+sudo systemctl daemon-reload
+sudo systemctl enable seasonal_study
+sudo systemctl start seasonal_study
+```
+
+You must edit the service file first:
+
+- set `User`
+- set `Group`
+- set `WorkingDirectory`
+- set `ExecStart`
+
+Install Caddy and configure the domain:
+
+```bash
+sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+You must edit the Caddyfile first:
+
+- replace `seasonality.example.com` with your real domain
+
+### Option B: Cloudflare Tunnel
+
+Use this if:
+
+- you want the app internet-facing without opening inbound ports on your router
+- you already use Cloudflare DNS, or are willing to
+
+High-level steps:
+
+1. install and start the app with systemd
+2. install `cloudflared`
+3. create a tunnel in Cloudflare
+4. point a hostname to that tunnel
+5. use `deploy/cloudflared-config.yml`
+6. run `cloudflared` as a service
+
+You must edit the tunnel config first:
+
+- replace `YOUR_TUNNEL_ID`
+- replace the credentials file path
+- replace `seasonality.example.com`
+
+## Which internet-facing option should I use?
+
+- simplest home-server path with a domain and open ports: Caddy
+- safest home-server path without exposing router ports: Cloudflare Tunnel
+
+If you are exposing this from home, Cloudflare Tunnel is usually the better default.
+
 ## Inputs
 
 The web UI supports:
@@ -110,6 +208,7 @@ This allows:
 - `app.py` - FastAPI dashboard
 - `seasonal_opex.py` - OPEX date and return calculation logic
 - `requirements.txt` - Python dependencies
+- `deploy/` - Linux deployment examples
 
 ## Example
 
