@@ -1,0 +1,7 @@
+# Files used only for local or Linux-server workflows.
+deploy/
+.agents/
+__pycache__/
+*.py[cod]
+*.csv
+nul

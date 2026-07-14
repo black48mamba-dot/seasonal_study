@@ -11,18 +11,20 @@ from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
 
 from seasonal_opex import (
+    FACTOR_PROXIES,
     MONTH_NAMES,
     build_opex_schedule,
-    download_prices,
-    get_close_series,
+    load_close_series,
 )
 
 DEFAULT_HISTORY_YEARS = 30
 DEFAULT_LOOKBACK_YEARS = 10
+WEAK_START_DAYS = 5
+WEAK_START_SAMPLES = 8
 
 app = FastAPI(title="OPEX Seasonality Dashboard")
 
-TICKER_PRESETS = ["SPY", "QQQ", "IWM", "DIA", "GLD"]
+TICKER_PRESETS = ["SPY", "QQQ", "IWM", "DIA", "GLD", "HBMOMO"]
 
 BASE_CSS = """
   :root {
@@ -176,8 +178,7 @@ def compute_cycle_returns_with_prices(
 ) -> tuple[pd.DataFrame, pd.Series]:
     current_year = datetime.now().year
     start_year = current_year - history_years
-    prices = download_prices(ticker=ticker, start_year=start_year, end_year=current_year)
-    close = get_close_series(prices)
+    close = load_close_series(ticker=ticker, start_year=start_year, end_year=current_year)
     first_date = close.index.min()
     last_date = close.index.max()
     schedule = build_opex_schedule(
@@ -542,6 +543,112 @@ def build_ytd_seasonality_chart(close: pd.Series, lookback_years: int, ticker: s
     return fig.to_html(include_plotlyjs=False, full_html=False)
 
 
+def compute_weak_start_forward_returns(
+    close: pd.Series,
+    selected_month: int,
+    start_days: int = WEAK_START_DAYS,
+    forward_horizons: tuple[int, ...] = (5, 10),
+) -> pd.DataFrame:
+    trading_index = close.index
+    rows: list[dict] = []
+
+    for year in sorted(set(trading_index.year)):
+        month_days = trading_index[(trading_index.year == year) & (trading_index.month == selected_month)]
+        if len(month_days) < start_days:
+            continue
+
+        first_trading_day = month_days[0]
+        signal_date = month_days[start_days - 1]
+        previous_close_date = get_previous_close_date(first_trading_day, trading_index)
+        if previous_close_date is None:
+            continue
+
+        signal_position = trading_index.get_loc(signal_date)
+        start_return_pct = (float(close.loc[signal_date]) / float(close.loc[previous_close_date]) - 1.0) * 100.0
+
+        row = {
+            "year": int(year),
+            "month": selected_month,
+            "month_label": MONTH_NAMES[selected_month],
+            "first_trading_day": first_trading_day,
+            "signal_date": signal_date,
+            "start_return_pct": start_return_pct,
+        }
+
+        for horizon in forward_horizons:
+            target_position = signal_position + horizon
+            column = f"forward_{horizon}d_return_pct"
+            if target_position >= len(trading_index):
+                row[column] = math.nan
+                row[f"forward_{horizon}d_end_date"] = pd.NaT
+                continue
+
+            target_date = trading_index[target_position]
+            row[column] = (float(close.loc[target_date]) / float(close.loc[signal_date]) - 1.0) * 100.0
+            row[f"forward_{horizon}d_end_date"] = target_date
+
+        rows.append(row)
+
+    return pd.DataFrame(rows).sort_values("start_return_pct") if rows else pd.DataFrame()
+
+
+def summarize_weak_start_forwards(weakest_starts: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for horizon in (5, 10):
+        column = f"forward_{horizon}d_return_pct"
+        if weakest_starts.empty or column not in weakest_starts:
+            continue
+
+        returns = weakest_starts[column].dropna()
+        rows.append(
+            {
+                "horizon": f"{horizon}D",
+                "observations": int(len(returns)),
+                "mean_return_pct": float(returns.mean()) if len(returns) else math.nan,
+                "median_return_pct": float(returns.median()) if len(returns) else math.nan,
+                "win_rate": float((returns > 0).mean() * 100.0) if len(returns) else math.nan,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def build_weak_start_chart(weakest_starts: pd.DataFrame, ticker: str, month_name: str) -> str:
+    if weakest_starts.empty:
+        return "<p>No weak-start data available for this month.</p>"
+
+    plot_df = weakest_starts[
+        ["year", "start_return_pct", "forward_5d_return_pct", "forward_10d_return_pct"]
+    ].copy()
+    plot_df = plot_df.rename(
+        columns={
+            "start_return_pct": f"First {WEAK_START_DAYS}D",
+            "forward_5d_return_pct": "Forward 5D",
+            "forward_10d_return_pct": "Forward 10D",
+        }
+    )
+    long_df = plot_df.melt(id_vars="year", var_name="window", value_name="return_pct").dropna()
+
+    fig = px.bar(
+        long_df,
+        x="year",
+        y="return_pct",
+        color="window",
+        barmode="group",
+        title=f"{ticker.upper()} - Weak {month_name} Starts and Forward Returns",
+        labels={"year": "Year", "return_pct": "Return %", "window": "Window"},
+        color_discrete_map={
+            f"First {WEAK_START_DAYS}D": "#64748b",
+            "Forward 5D": "#2563eb",
+            "Forward 10D": "#15803d",
+        },
+    )
+    fig.add_hline(y=0, line_color="#9ca3af", line_width=1)
+    apply_chart_theme(fig)
+    fig.update_layout(height=430, margin=dict(l=40, r=20, t=60, b=40))
+    return fig.to_html(include_plotlyjs=False, full_html=False)
+
+
 def build_weekly_global_chart(weekly_summary: pd.DataFrame, ticker: str) -> str:
     if weekly_summary.empty:
         return "<p>No weekly bucket data available.</p>"
@@ -833,6 +940,9 @@ def render_dashboard(
     weekly_global_summary = summarize_weekly_buckets(weekly_returns)
     weekly_monthly_summary = summarize_weekly_buckets_by_month(weekly_returns)
     ytd_seasonality_chart = build_ytd_seasonality_chart(close, lookback_years=lookback_years, ticker=ticker)
+    weak_start_all = compute_weak_start_forward_returns(close, selected_month=selected_month)
+    weakest_starts = weak_start_all.head(WEAK_START_SAMPLES).copy()
+    weak_start_summary = summarize_weak_start_forwards(weakest_starts)
 
     selected_cycles_table = selected_cycles[
         ["cycle_year", "start_date", "end_date", "start_close", "end_close", "return_pct"]
@@ -852,6 +962,7 @@ def render_dashboard(
         ticker=ticker,
         show_std=show_weekly_std,
     )
+    weak_start_chart = build_weak_start_chart(weakest_starts, ticker=ticker, month_name=month_name)
     monthly_comparison_table = monthly_comparison.copy()
     monthly_comparison_table["mean_return_pct"] = monthly_comparison_table["mean_return_pct"].map(color_signed_value)
     monthly_comparison_table["std_return_pct"] = monthly_comparison_table["std_return_pct"].map(
@@ -870,6 +981,34 @@ def render_dashboard(
     weekly_monthly_table["std_return_pct"] = weekly_monthly_table["std_return_pct"].map(
         lambda x: "" if pd.isna(x) else f"{x:.2f}"
     )
+    weak_start_summary_table = weak_start_summary.copy()
+    if not weak_start_summary_table.empty:
+        weak_start_summary_table["mean_return_pct"] = weak_start_summary_table["mean_return_pct"].map(color_signed_value)
+        weak_start_summary_table["median_return_pct"] = weak_start_summary_table["median_return_pct"].map(color_signed_value)
+        weak_start_summary_table["win_rate"] = weak_start_summary_table["win_rate"].map(
+            lambda x: "" if pd.isna(x) else f"{x:.2f}%"
+        )
+
+    weak_start_table = weakest_starts.copy()
+    if not weak_start_table.empty:
+        for col in ["first_trading_day", "signal_date", "forward_5d_end_date", "forward_10d_end_date"]:
+            if col in weak_start_table:
+                weak_start_table[col] = weak_start_table[col].dt.strftime("%Y-%m-%d")
+        for col in ["start_return_pct", "forward_5d_return_pct", "forward_10d_return_pct"]:
+            if col in weak_start_table:
+                weak_start_table[col] = weak_start_table[col].map(color_signed_value)
+        keep_cols = [
+            "year",
+            "month_label",
+            "first_trading_day",
+            "signal_date",
+            "start_return_pct",
+            "forward_5d_end_date",
+            "forward_5d_return_pct",
+            "forward_10d_end_date",
+            "forward_10d_return_pct",
+        ]
+        weak_start_table = weak_start_table[[col for col in keep_cols if col in weak_start_table.columns]]
 
     options_html = "".join(
         f'<option value="{month}" {"selected" if month == selected_month else ""}>{label}</option>'
@@ -883,6 +1022,14 @@ def render_dashboard(
         f'href="{build_query_string(preset, selected_month, lookback_years, show_weekly_std)}">{preset}</a>'
         for preset in TICKER_PRESETS
     )
+    proxy_note_html = ""
+    if active_ticker in FACTOR_PROXIES:
+        proxy = FACTOR_PROXIES[active_ticker]
+        components = ", ".join(proxy["components"])
+        proxy_note_html = (
+            f'<p class="subhead">{active_ticker} proxy: {proxy["description"]} '
+            f'Components: {components}.</p>'
+        )
 
     mean_return = metrics["mean_return_pct"]
     mean_card_cls = "pos" if (not pd.isna(mean_return) and mean_return > 0) else (
@@ -910,6 +1057,7 @@ def render_dashboard(
       <div class="brand"><span class="dot"></span>OPEX Seasonality</div>
       <nav class="section-nav">
         <a href="#overview">Overview</a>
+        <a href="#rebound">Rebound</a>
         <a href="#monthly">Monthly</a>
         <a href="#weekly">Weekly</a>
         <a href="#details">Details</a>
@@ -948,6 +1096,7 @@ def render_dashboard(
       Showing the latest available {actual_lookback_years} completed {month_name} cycles for {active_ticker}.
       Cycle = return from the prior monthly OPEX close to the selected month's OPEX close.
     </p>
+    {proxy_note_html}
 
     <section id="overview">
       <div class="section-title"><h2>Overview</h2><span class="tag">{active_ticker} · {month_name} · {lookback_years}y</span></div>
@@ -961,6 +1110,20 @@ def render_dashboard(
       </div>
       <div class="panel">{selected_month_chart}</div>
       <div class="panel">{ytd_seasonality_chart}</div>
+    </section>
+
+    <section id="rebound">
+      <div class="section-title"><h2>Rebound</h2><span class="tag">weak {month_name} starts</span></div>
+      <p class="section-desc">Ranks the weakest first {WEAK_START_DAYS} trading days in {month_name}, then measures forward 5-trading-day and 10-trading-day returns from that signal close.</p>
+      <div class="panel">{weak_start_chart}</div>
+      <div class="panel">
+        <h3>Forward return summary</h3>
+        <div class="table-wrap">{weak_start_summary_table.to_html(index=False, escape=False, classes="data")}</div>
+      </div>
+      <div class="panel">
+        <h3>Weakest starts</h3>
+        <div class="table-wrap">{weak_start_table.to_html(index=False, escape=False, classes="data")}</div>
+      </div>
     </section>
 
     <section id="monthly">
@@ -1086,6 +1249,12 @@ def render_error_page(
 </body>
 </html>
 """
+
+
+@app.get("/healthz", include_in_schema=False)
+def healthz() -> dict[str, str]:
+    """Lightweight deployment check that does not call the market-data provider."""
+    return {"status": "ok"}
 
 
 @app.get("/", response_class=HTMLResponse)
