@@ -24,6 +24,14 @@ MONTH_NAMES = {
     12: "Dec",
 }
 
+FACTOR_PROXIES = {
+    "HBMOMO": {
+        "name": "High Beta Momentum Proxy",
+        "components": ["SPHB", "MTUM"],
+        "description": "Equal-weight blend of SPHB and MTUM.",
+    },
+}
+
 
 @dataclass(frozen=True)
 class OpexCycleReturn:
@@ -126,13 +134,48 @@ def get_close_series(prices: pd.DataFrame) -> pd.Series:
     return close.dropna()
 
 
+def load_close_series(ticker: str, start_year: int, end_year: int) -> pd.Series:
+    symbol = ticker.upper().strip()
+    if symbol in FACTOR_PROXIES:
+        return build_factor_proxy_close(symbol, start_year=start_year, end_year=end_year)
+
+    prices = download_prices(symbol, start_year, end_year)
+    return get_close_series(prices)
+
+
+def build_factor_proxy_close(proxy_symbol: str, start_year: int, end_year: int) -> pd.Series:
+    proxy = FACTOR_PROXIES[proxy_symbol]
+    component_closes: list[pd.Series] = []
+
+    for component in proxy["components"]:
+        prices = download_prices(component, start_year, end_year)
+        close = get_close_series(prices).rename(component)
+        component_closes.append(close)
+
+    closes = pd.concat(component_closes, axis=1).dropna(how="any")
+    if closes.empty:
+        components = ", ".join(proxy["components"])
+        raise ValueError(f"No overlapping price history for {proxy_symbol} components: {components}.")
+
+    component_returns = closes.pct_change().dropna(how="any")
+    if component_returns.empty:
+        raise ValueError(f"Not enough overlapping price history to build {proxy_symbol}.")
+
+    equal_weight_returns = component_returns.mean(axis=1)
+    synthetic_close = (1.0 + equal_weight_returns).cumprod() * 100.0
+    first_level = pd.Series([100.0], index=[closes.index[0]], name=proxy_symbol)
+    synthetic_close = pd.concat([first_level, synthetic_close.rename(proxy_symbol)])
+    synthetic_close = synthetic_close[~synthetic_close.index.duplicated(keep="first")]
+    return synthetic_close.sort_index()
+
+
 def compute_opex_cycle_returns(
     ticker: str,
     start_year: int,
     end_year: int,
 ) -> pd.DataFrame:
-    prices = download_prices(ticker, start_year, end_year)
-    close = get_close_series(prices)
+    ticker = ticker.upper().strip()
+    close = load_close_series(ticker, start_year, end_year)
     first_date = close.index.min()
     last_date = close.index.max()
 

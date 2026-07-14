@@ -28,6 +28,12 @@ Cycle definition:
 - YTD cumulative return overlay:
   - average prior-year path
   - current-year path to latest available date
+- weak-start rebound study:
+  - weakest first 5 trading days of the selected month
+  - forward 5-trading-day return
+  - forward 10-trading-day return
+- factor proxy support:
+  - `HBMOMO` = equal-weight blend of `SPHB` and `MTUM`
 
 ## Requirements
 
@@ -51,6 +57,38 @@ Open:
 ```text
 http://127.0.0.1:8000
 ```
+
+## Deploy to Vercel
+
+The repository is configured for Vercel's FastAPI runtime. Vercel detects the
+root `app.py` entry point, installs `requirements.txt`, and uses Python 3.12 as
+specified by `.python-version`. No environment variables or custom build command
+are required.
+
+### Vercel dashboard
+
+1. Import this Git repository into Vercel.
+2. Keep the project root as `./` and leave the build, output, and install
+   commands at their detected defaults.
+3. Deploy the project.
+4. Open `/healthz` on the deployment URL. A healthy deployment returns
+   `{"status":"ok"}` without contacting Yahoo Finance.
+5. Open `/` to load the dashboard and verify outbound market-data access.
+
+### Vercel CLI
+
+With Node.js installed, deploy a preview and then production:
+
+```bash
+npx vercel@latest
+npx vercel@latest --prod
+```
+
+The dashboard runs as one Fluid compute function with a 120-second request
+limit. The deployment excludes Linux service templates and local CSV output
+from the function bundle. If Vercel reports that the Python bundle exceeds its
+standard size limit, enable the project environment variable
+`VERCEL_SUPPORT_LARGE_FUNCTIONS=1` and redeploy.
 
 ## Run on a server
 
@@ -167,6 +205,7 @@ If you are exposing this from home, Cloudflare Tunnel is usually the better defa
 The web UI supports:
 
 - ticker, for example `SPY` or `QQQ`
+- factor proxy, for example `HBMOMO`
 - ending month
 - lookback years
 
@@ -199,15 +238,33 @@ This allows:
 ## Notes on data
 
 - price data is fetched with `yfinance`
+- `HBMOMO` is synthetic and is calculated from component daily returns
+- current `HBMOMO` definition: equal-weight `SPHB` and `MTUM`
 - if Yahoo access is blocked by local firewall, proxy, antivirus, or network policy, data loading can fail
 - common symptom: `possibly delisted` for valid tickers like `SPY` or `QQQ`
 - that message is usually upstream fetch failure, not a real delisting
+
+## Factor Proxy Example
+
+The dashboard supports `HBMOMO` as a simple high-beta momentum proxy:
+
+```text
+HBMOMO = 50% SPHB + 50% MTUM, rebalanced daily in return space
+```
+
+Run the CLI version:
+
+```bash
+python seasonal_opex.py --tickers HBMOMO --start-year 2015 --end-year 2026
+```
 
 ## Repository structure
 
 - `app.py` - FastAPI dashboard
 - `seasonal_opex.py` - OPEX date and return calculation logic
 - `requirements.txt` - Python dependencies
+- `.python-version` - Python version used by Vercel and compatible tooling
+- `vercel.json` - Vercel Fluid compute and function configuration
 - `deploy/` - Linux deployment examples
 
 ## Example
@@ -229,6 +286,13 @@ To inspect weekly behavior:
    - Weekly Bucket Mean Return by Month
    - Weekly bucket summary table
    - Weekly bucket monthly breakdown table
+
+To inspect short-horizon mean reversion after weak starts:
+
+1. choose a ticker or `HBMOMO`
+2. choose the month
+3. review the Rebound section
+4. compare the weakest first 5 trading days against forward 5D and 10D returns
 
 ## Clone
 
