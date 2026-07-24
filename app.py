@@ -15,12 +15,20 @@ from seasonal_opex import (
     MONTH_NAMES,
     build_opex_schedule,
     load_close_series,
+    month_end,
+    third_friday,
 )
 
 DEFAULT_HISTORY_YEARS = 30
 DEFAULT_LOOKBACK_YEARS = 10
 WEAK_START_DAYS = 5
 WEAK_START_SAMPLES = 8
+
+COMPUTATION_MODES = {
+    "opex": "OPEX cycle",
+    "calendar": "Calendar month",
+}
+DEFAULT_MODE = "opex"
 
 app = FastAPI(title="OPEX Seasonality Dashboard")
 
@@ -175,6 +183,7 @@ BASE_CSS = """
 def compute_cycle_returns_with_prices(
     ticker: str,
     history_years: int,
+    mode: str = DEFAULT_MODE,
 ) -> tuple[pd.DataFrame, pd.Series]:
     current_year = datetime.now().year
     start_year = current_year - history_years
@@ -188,6 +197,7 @@ def compute_cycle_returns_with_prices(
         start_month=first_date.month,
         end_month=last_date.month,
         max_completed_date=last_date,
+        nominal_date_fn=month_end if mode == "calendar" else third_friday,
     )
 
     rows: list[dict] = []
@@ -304,16 +314,17 @@ def apply_chart_theme(fig: go.Figure) -> go.Figure:
     return fig
 
 
-def build_selected_month_chart(selected_cycles: pd.DataFrame, month_name: str, ticker: str) -> str:
+def build_selected_month_chart(selected_cycles: pd.DataFrame, month_name: str, ticker: str, mode: str = DEFAULT_MODE) -> str:
     if selected_cycles.empty:
         return "<p>No completed cycles available for the selected month in the current lookback window.</p>"
 
+    return_kind = "Calendar Month" if mode == "calendar" else "OPEX-to-OPEX"
     bar_colors = gradient_colors_for_returns(selected_cycles["return_pct"])
     fig = px.bar(
         selected_cycles,
         x="cycle_year",
         y="return_pct",
-        title=f"{ticker.upper()} - {month_name} OPEX-to-OPEX Returns by Year",
+        title=f"{ticker.upper()} - {month_name} {return_kind} Returns by Year",
         labels={"cycle_year": "Cycle year", "return_pct": "Return %"},
     )
     fig.update_traces(marker_color=bar_colors)
@@ -352,7 +363,7 @@ def get_previous_close_date(target_date: pd.Timestamp, trading_index: pd.Datetim
     return eligible[-1]
 
 
-def compute_week_bucket_returns(close: pd.Series, cycle_returns: pd.DataFrame) -> pd.DataFrame:
+def compute_week_bucket_returns(close: pd.Series, cycle_returns: pd.DataFrame, mode: str = DEFAULT_MODE) -> pd.DataFrame:
     trading_index = close.index
     bucket_order = {
         "week_1": 1,
@@ -360,25 +371,33 @@ def compute_week_bucket_returns(close: pd.Series, cycle_returns: pd.DataFrame) -
         "opex_week": 3,
         "post_opex_week": 4,
     }
-    bucket_labels = {
-        "week_1": "Week 1",
-        "week_2": "Week 2",
-        "opex_week": "OPEX Week",
-        "post_opex_week": "Post-OPEX Week",
-    }
+    if mode == "calendar":
+        bucket_labels = {
+            "week_1": "Week 1",
+            "week_2": "Week 2",
+            "opex_week": "Month-End Week",
+            "post_opex_week": "Post Month-End Week",
+        }
+    else:
+        bucket_labels = {
+            "week_1": "Week 1",
+            "week_2": "Week 2",
+            "opex_week": "OPEX Week",
+            "post_opex_week": "Post-OPEX Week",
+        }
 
     rows: list[dict] = []
     month_rows = cycle_returns[["ticker", "cycle_year", "cycle_month", "cycle_label", "end_date"]].dropna().drop_duplicates()
 
     for row in month_rows.itertuples(index=False):
         month_start = pd.Timestamp(year=int(row.cycle_year), month=int(row.cycle_month), day=1)
-        month_end = month_start + pd.offsets.MonthEnd(1)
+        month_end_date = month_start + pd.offsets.MonthEnd(1)
         week_cursor = month_start - pd.Timedelta(days=month_start.weekday())
 
         week_segments: list[dict] = []
-        while week_cursor <= month_end:
+        while week_cursor <= month_end_date:
             segment_start = max(week_cursor, month_start)
-            segment_end = min(week_cursor + pd.Timedelta(days=6), month_end)
+            segment_end = min(week_cursor + pd.Timedelta(days=6), month_end_date)
             week_days = trading_index[(trading_index >= segment_start) & (trading_index <= segment_end)]
             if len(week_days) > 0:
                 week_segments.append(
@@ -504,11 +523,13 @@ def build_ytd_seasonality_chart(close: pd.Series, lookback_years: int, ticker: s
         filtered.groupby("year")["daily_return"].transform(lambda s: ((1.0 + s).cumprod() - 1.0) * 100.0)
     )
 
-    prior_mean = (
-        filtered[filtered["year"].isin(prior_years)]
-        .groupby("trading_day_of_year", as_index=False)["cum_return_pct"]
-        .mean()
-    )
+    prior_grouped = filtered[filtered["year"].isin(prior_years)].groupby("trading_day_of_year")["cum_return_pct"]
+    prior_mean = prior_grouped.mean().reset_index()
+    prior_mean["observations"] = prior_grouped.size().to_numpy()
+    # Only keep trading days where every prior year has data, otherwise the mean at the
+    # tail is computed over a shrinking, non-random subset of years and produces a
+    # misleading spike (e.g. a single leftover year at day 253).
+    prior_mean = prior_mean[prior_mean["observations"] == len(prior_years)].drop(columns="observations")
     current_path = filtered[filtered["year"] == current_year][["trading_day_of_year", "cum_return_pct"]].copy()
 
     fig = go.Figure()
@@ -814,7 +835,7 @@ def build_return_colorscale(values: pd.DataFrame) -> tuple[list[list[float | str
     return colorscale, zmin, zmax
 
 
-def build_heatmap(cycle_returns: pd.DataFrame, ticker: str) -> str:
+def build_heatmap(cycle_returns: pd.DataFrame, ticker: str, mode: str = DEFAULT_MODE) -> str:
     pivot = (
         cycle_returns.pivot(index="cycle_year", columns="cycle_month", values="return_pct")
         .sort_index()
@@ -838,7 +859,7 @@ def build_heatmap(cycle_returns: pd.DataFrame, ticker: str) -> str:
     )
     apply_chart_theme(fig)
     fig.update_layout(
-        title=f"{ticker.upper()} - Monthly OPEX Cycle Return Heatmap",
+        title=f"{ticker.upper()} - Monthly {'Calendar' if mode == 'calendar' else 'OPEX Cycle'} Return Heatmap",
         height=540,
         margin=dict(l=40, r=20, t=60, b=40),
     )
@@ -905,7 +926,7 @@ def format_value_signed(value: float) -> str:
     return f'<span class="num {cls}">{value:+.2f}%</span>'
 
 
-def build_query_string(ticker: str, month: int, lookback: int, show_weekly_std: bool) -> str:
+def build_query_string(ticker: str, month: int, lookback: int, show_weekly_std: bool, mode: str = DEFAULT_MODE) -> str:
     """Build a GET query string preserving the active dashboard params."""
     std_flag = "1" if show_weekly_std else "0"
     return "?" + urlencode(
@@ -914,6 +935,7 @@ def build_query_string(ticker: str, month: int, lookback: int, show_weekly_std: 
             "month": month,
             "lookback": lookback,
             "show_weekly_std": std_flag,
+            "mode": mode,
         }
     )
 
@@ -923,9 +945,10 @@ def render_dashboard(
     selected_month: int,
     lookback_years: int,
     show_weekly_std: bool,
+    mode: str = DEFAULT_MODE,
 ) -> str:
     history_years = max(lookback_years + 2, 12)
-    cycle_returns, close = compute_cycle_returns_with_prices(ticker, history_years=history_years)
+    cycle_returns, close = compute_cycle_returns_with_prices(ticker, history_years=history_years, mode=mode)
     month_name = MONTH_NAMES[selected_month]
 
     filtered = cycle_returns[cycle_returns["cycle_month"] == selected_month].sort_values("cycle_year")
@@ -936,7 +959,7 @@ def render_dashboard(
 
     heatmap_source = select_heatmap_window(cycle_returns, lookback_years=lookback_years)
     monthly_comparison = summarize_monthly_comparison(heatmap_source)
-    weekly_returns = compute_week_bucket_returns(close, heatmap_source)
+    weekly_returns = compute_week_bucket_returns(close, heatmap_source, mode=mode)
     weekly_global_summary = summarize_weekly_buckets(weekly_returns)
     weekly_monthly_summary = summarize_weekly_buckets_by_month(weekly_returns)
     ytd_seasonality_chart = build_ytd_seasonality_chart(close, lookback_years=lookback_years, ticker=ticker)
@@ -953,8 +976,8 @@ def render_dashboard(
         selected_cycles_table[col] = selected_cycles_table[col].map(lambda x: f"{x:.2f}")
     selected_cycles_table["return_pct"] = selected_cycles_table["return_pct"].map(color_signed_value)
 
-    selected_month_chart = build_selected_month_chart(selected_cycles, month_name, ticker=ticker)
-    heatmap_chart = build_heatmap(heatmap_source, ticker=ticker)
+    selected_month_chart = build_selected_month_chart(selected_cycles, month_name, ticker=ticker, mode=mode)
+    heatmap_chart = build_heatmap(heatmap_source, ticker=ticker, mode=mode)
     monthly_comparison_chart = build_monthly_comparison_chart(monthly_comparison, ticker=ticker)
     weekly_global_chart = build_weekly_global_chart(weekly_global_summary, ticker=ticker)
     weekly_monthly_heatmap = build_weekly_monthly_heatmap(
@@ -1014,12 +1037,31 @@ def render_dashboard(
         f'<option value="{month}" {"selected" if month == selected_month else ""}>{label}</option>'
         for month, label in MONTH_NAMES.items()
     )
+    mode_options_html = "".join(
+        f'<option value="{mode_key}" {"selected" if mode_key == mode else ""}>{mode_label_option}</option>'
+        for mode_key, mode_label_option in COMPUTATION_MODES.items()
+    )
     show_std_checked = "checked" if show_weekly_std else ""
+    mode_label = COMPUTATION_MODES.get(mode, COMPUTATION_MODES[DEFAULT_MODE])
+    cycle_definition_text = (
+        "Cycle = return from the prior calendar month's last close to the selected month's last close."
+        if mode == "calendar"
+        else "Cycle = return from the prior monthly OPEX close to the selected month's OPEX close."
+    )
+    weekly_section_desc = (
+        "Performance split into Week 1, Week 2, Month-End Week, and Post Month-End Week. Week 1 &amp; Week 2 are "
+        "the first two Mon-Fri market weeks touching the month; Month-End Week contains the month's last trading "
+        "day; Post Month-End Week is the next market week after."
+        if mode == "calendar"
+        else "Performance split into Week 1, Week 2, OPEX Week, and Post-OPEX Week. Week 1 &amp; Week 2 are the "
+        "first two Mon-Fri market weeks touching the month; OPEX Week contains that month's OPEX day; "
+        "Post-OPEX Week is the next market week after."
+    )
 
     active_ticker = ticker.upper()
     preset_chips = "".join(
         f'<a class="chip{" active" if preset == active_ticker else ""}" '
-        f'href="{build_query_string(preset, selected_month, lookback_years, show_weekly_std)}">{preset}</a>'
+        f'href="{build_query_string(preset, selected_month, lookback_years, show_weekly_std, mode=mode)}">{preset}</a>'
         for preset in TICKER_PRESETS
     )
     proxy_note_html = ""
@@ -1080,6 +1122,10 @@ def render_dashboard(
           <label for="lookback">Lookback years</label>
           <input type="number" id="lookback" name="lookback" min="3" max="30" value="{lookback_years}" />
         </div>
+        <div class="field">
+          <label for="mode">Computation mode</label>
+          <select id="mode" name="mode">{mode_options_html}</select>
+        </div>
         <label class="field-check">
           <input type="checkbox" name="show_weekly_std" value="1" {show_std_checked} />
           Show weekly std-dev labels
@@ -1094,13 +1140,13 @@ def render_dashboard(
 
     <p class="subhead">
       Showing the latest available {actual_lookback_years} completed {month_name} cycles for {active_ticker}.
-      Cycle = return from the prior monthly OPEX close to the selected month's OPEX close.
+      {cycle_definition_text}
     </p>
     {proxy_note_html}
 
     <section id="overview">
       <div class="section-title"><h2>Overview</h2><span class="tag">{active_ticker} · {month_name} · {lookback_years}y</span></div>
-      <p class="section-desc">Headline seasonality metrics for the selected month's OPEX cycle, plus how the current year is tracking against the prior-year average.</p>
+      <p class="section-desc">Headline seasonality metrics for the selected month's {mode_label} cycle, plus how the current year is tracking against the prior-year average.</p>
       <div class="cards">
         <div class="card {mean_card_cls}"><div class="label">{month_name} mean return</div><div class="value">{format_value_signed(metrics["mean_return_pct"])}</div></div>
         <div class="card neutral"><div class="label">{month_name} return std dev</div><div class="value">{format_value(metrics["std_return_pct"], "%")}</div></div>
@@ -1139,7 +1185,7 @@ def render_dashboard(
 
     <section id="weekly">
       <div class="section-title"><h2>Weekly</h2><span class="tag">within-month buckets</span></div>
-      <p class="section-desc">Performance split into Week 1, Week 2, OPEX Week, and Post-OPEX Week. Week 1 &amp; Week 2 are the first two Mon-Fri market weeks touching the month; OPEX Week contains that month's OPEX day; Post-OPEX Week is the next market week after.</p>
+      <p class="section-desc">{weekly_section_desc}</p>
       <div class="panel">{weekly_global_chart}</div>
       <div class="panel">{weekly_monthly_heatmap}</div>
       <div class="panel">
@@ -1185,10 +1231,15 @@ def render_error_page(
     lookback_years: int,
     error_message: str,
     show_weekly_std: bool,
+    mode: str = DEFAULT_MODE,
 ) -> str:
     options_html = "".join(
         f'<option value="{month}" {"selected" if month == selected_month else ""}>{label}</option>'
         for month, label in MONTH_NAMES.items()
+    )
+    mode_options_html = "".join(
+        f'<option value="{mode_key}" {"selected" if mode_key == mode else ""}>{mode_label_option}</option>'
+        for mode_key, mode_label_option in COMPUTATION_MODES.items()
     )
     show_std_checked = "checked" if show_weekly_std else ""
     active_ticker = ticker.upper()
@@ -1227,6 +1278,10 @@ def render_error_page(
           <label for="lookback">Lookback years</label>
           <input type="number" id="lookback" name="lookback" min="3" max="30" value="{lookback_years}" />
         </div>
+        <div class="field">
+          <label for="mode">Computation mode</label>
+          <select id="mode" name="mode">{mode_options_html}</select>
+        </div>
         <label class="field-check">
           <input type="checkbox" name="show_weekly_std" value="1" {show_std_checked} />
           Show weekly std-dev labels
@@ -1263,13 +1318,17 @@ def home(
     month: int = Query(datetime.now().month, ge=1, le=12),
     lookback: int = Query(DEFAULT_LOOKBACK_YEARS, ge=3, le=30),
     show_weekly_std: bool = Query(False),
+    mode: str = Query(DEFAULT_MODE),
 ) -> HTMLResponse:
+    if mode not in COMPUTATION_MODES:
+        mode = DEFAULT_MODE
     try:
         html = render_dashboard(
             ticker=ticker,
             selected_month=month,
             lookback_years=lookback,
             show_weekly_std=show_weekly_std,
+            mode=mode,
         )
     except Exception as exc:
         html = render_error_page(
@@ -1278,5 +1337,6 @@ def home(
             lookback_years=lookback,
             error_message=str(exc),
             show_weekly_std=show_weekly_std,
+            mode=mode,
         )
     return HTMLResponse(html)

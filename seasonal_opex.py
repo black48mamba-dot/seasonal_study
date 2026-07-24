@@ -4,7 +4,7 @@ import argparse
 import time
 import warnings
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Callable, Iterable
 
 import pandas as pd
 import yfinance as yf
@@ -51,6 +51,10 @@ def third_friday(year: int, month: int) -> pd.Timestamp:
     return first_day + pd.Timedelta(days=first_friday_offset + 14)
 
 
+def month_end(year: int, month: int) -> pd.Timestamp:
+    return pd.Timestamp(year=year, month=month, day=1) + pd.offsets.MonthEnd(1)
+
+
 def get_previous_trading_day(target_date: pd.Timestamp, trading_index: pd.DatetimeIndex) -> pd.Timestamp:
     eligible = trading_index[trading_index <= target_date]
     if len(eligible) == 0:
@@ -65,13 +69,14 @@ def build_opex_schedule(
     start_month: int = 1,
     end_month: int = 12,
     max_completed_date: pd.Timestamp | None = None,
+    nominal_date_fn: Callable[[int, int], pd.Timestamp] = third_friday,
 ) -> list[tuple[int, int, pd.Timestamp]]:
     schedule: list[tuple[int, int, pd.Timestamp]] = []
     for year in range(start_year, end_year + 1):
         first_month = start_month if year == start_year else 1
         last_month = end_month if year == end_year else 12
         for month in range(first_month, last_month + 1):
-            nominal = third_friday(year, month)
+            nominal = nominal_date_fn(year, month)
             actual = get_previous_trading_day(nominal, trading_index)
             if max_completed_date is not None and actual > max_completed_date:
                 continue
